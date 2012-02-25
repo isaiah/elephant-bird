@@ -25,7 +25,7 @@ import org.apache.thrift.TBase;
 import org.apache.thrift.protocol.TType;
 
 import com.google.common.collect.Lists;
-import com.twitter.elephantbird.pig.load.LzoThriftB64LinePigLoader;
+import com.twitter.elephantbird.pig.load.ThriftPigLoader;
 import com.twitter.elephantbird.thrift.TStructDescriptor;
 import com.twitter.elephantbird.thrift.TStructDescriptor.Field;
 import com.twitter.elephantbird.util.ThriftUtils;
@@ -56,6 +56,10 @@ public class ThriftToPig<M extends TBase<?, ?>> {
     structDesc = TStructDescriptor.getInstance(tClass);
   }
 
+  public TStructDescriptor getTStructDescriptor() {
+    return structDesc;
+  }
+
   /**
    * Converts a thrift object to Pig tuple.
    * All the fields are deserialized.
@@ -73,7 +77,7 @@ public class ThriftToPig<M extends TBase<?, ?>> {
    * @return
    */
   public Tuple getLazyTuple(M thriftObj) {
-    return new LazyTuple(thriftObj);
+    return new LazyTuple(structDesc, thriftObj);
   }
 
   @SuppressWarnings("unchecked")
@@ -84,7 +88,7 @@ public class ThriftToPig<M extends TBase<?, ?>> {
       Field field = tDesc.getFieldAt(i);
       Object value = tDesc.getFieldValue(i, tObj);
       try {
-        tuple.set(i, toPigObject(field, value));
+        tuple.set(i, toPigObject(field, value, false));
       } catch (ExecException e) { // not expected
         throw new RuntimeException(e);
       }
@@ -93,7 +97,7 @@ public class ThriftToPig<M extends TBase<?, ?>> {
   }
 
   @SuppressWarnings("unchecked")
-  private static Object toPigObject(Field field, Object value) {
+  static Object toPigObject(Field field, Object value, boolean lazy) {
     if (value == null) {
       return null;
     }
@@ -108,13 +112,17 @@ public class ThriftToPig<M extends TBase<?, ?>> {
     case TType.STRING:
       return stringTypeToPig(value);
     case TType.STRUCT:
-      return toTuple(field.gettStructDescriptor(), (TBase<?, ?>)value);
+      if (lazy) {
+        return new LazyTuple(field.gettStructDescriptor(), (TBase<?, ?>)value);
+      } else {
+        return toTuple(field.gettStructDescriptor(), (TBase<?, ?>)value);
+      }
     case TType.MAP:
-      return toPigMap(field, (Map<Object, Object>)value);
+      return toPigMap(field, (Map<Object, Object>)value, lazy);
     case TType.SET:
-      return toPigBag(field.getSetElemField(), (Collection<Object>)value);
+      return toPigBag(field.getSetElemField(), (Collection<Object>)value, lazy);
     case TType.LIST:
-      return toPigBag(field.getListElemField(), (Collection<Object>)value);
+      return toPigBag(field.getListElemField(), (Collection<Object>)value, lazy);
     case TType.ENUM:
       return value.toString();
     default:
@@ -146,14 +154,16 @@ public class ThriftToPig<M extends TBase<?, ?>> {
     return null;
   }
 
-  private static Map<String, Object> toPigMap(Field field, Map<Object, Object> map) {
+  private static Map<String, Object> toPigMap(Field field,
+                                              Map<Object, Object> map,
+                                              boolean lazy) {
     // PIG map's key always a String. just use toString() and hope
     // things would work out ok.
     HashMap<String, Object> out = new HashMap<String, Object>(map.size());
     Field valueField = field.getMapValueField();
     for(Entry<Object, Object> e : map.entrySet()) {
       Object prev = out.put(e.getKey().toString(),
-                            toPigObject(valueField, e.getValue()));
+                            toPigObject(valueField, e.getValue(), lazy));
       if (prev != null) {
         String msg = "Duplicate keys while converting to String while "
           + " processing map " + field.getName() + " (key type : "
@@ -166,10 +176,12 @@ public class ThriftToPig<M extends TBase<?, ?>> {
     return out;
   }
 
-  private static DataBag toPigBag(Field field, Collection<Object> values) {
+  private static DataBag toPigBag(Field field,
+                                  Collection<Object> values,
+                                  boolean lazy) {
     List<Tuple> tuples = Lists.newArrayListWithExpectedSize(values.size());
     for(Object value : values) {
-      Object pValue = toPigObject(field, value);
+      Object pValue = toPigObject(field, value, lazy);
       if (pValue instanceof Tuple) { // DataBag should contain Tuples
         tuples.add((Tuple)pValue);
       } else {
@@ -183,7 +195,7 @@ public class ThriftToPig<M extends TBase<?, ?>> {
   /**
    * Delays serialization of Thrift fields until they are requested.
    */
-  private class LazyTuple extends AbstractLazyTuple {
+  private static class LazyTuple extends AbstractLazyTuple {
     /* NOTE : This is only a partial optimization. The other part
      * is to avoid deserialization of the Thrift fields from the
      * binary buffer.
@@ -198,17 +210,19 @@ public class ThriftToPig<M extends TBase<?, ?>> {
      * Even TDeserializer 'skips'/ignores only after deserializing fields.
      * (e.g. Strings, Integers, buffers etc).
      */
-    private M tObject;
+    private TBase<?, ?> tObject;
+    private TStructDescriptor desc;
 
-    LazyTuple(M tObject) {
-      initRealTuple(structDesc.getFields().size());
+    LazyTuple(TStructDescriptor desc, TBase<?, ?> tObject) {
+      initRealTuple(desc.getFields().size());
       this.tObject = tObject;
+      this.desc = desc;
     }
 
     @Override
     protected Object getObjectAt(int index) {
-      Field field = structDesc.getFieldAt(index);
-      return toPigObject(field, structDesc.getFieldValue(index, tObject));
+      Field field = desc.getFieldAt(index);
+      return toPigObject(field, desc.getFieldValue(index, tObject), true);
     }
   }
 
@@ -218,6 +232,11 @@ public class ThriftToPig<M extends TBase<?, ?>> {
   public static Schema toSchema(Class<? extends TBase<?, ?>> tClass) {
     return toSchema(TStructDescriptor.getInstance(tClass));
   }
+
+  public Schema toSchema() {
+    return toSchema(structDesc);
+  }
+
   public static Schema toSchema(TStructDescriptor tDesc ) {
     Schema schema = new Schema();
 
@@ -236,7 +255,7 @@ public class ThriftToPig<M extends TBase<?, ?>> {
 
     return schema;
   }
-
+  //TODO we should probably implement better naming, the current system is pretty nonsensical now
   private static FieldSchema singleFieldToFieldSchema(String fieldName, Field field) throws FrontendException {
     switch (field.getType()) {
       case TType.LIST:
@@ -258,33 +277,30 @@ public class ThriftToPig<M extends TBase<?, ?>> {
   }
 
   /**
+   * A helper function which wraps a Schema in a tuple (for Pig bags) if our version of pig makes it necessary
+   */
+  private static Schema wrapInTupleIfPig9(Schema schema) throws FrontendException {
+      if (PigUtil.Pig9orNewer) {
+          return new Schema(new FieldSchema("t",schema,DataType.TUPLE));
+      } else {
+          return schema;
+      }
+  }
+
+  /**
    * Returns a schema with single tuple (for Pig bags).
    */
   private static Schema singleFieldToTupleSchema(String fieldName, Field field) throws FrontendException {
-
-    FieldSchema fieldSchema = null;
-
     switch (field.getType()) {
       case TType.STRUCT:
-        // wrapping STRUCT in a FieldSchema makes it impossible to
-        // access fields in PIG script (causes runtime error).
-        return toSchema(field.gettStructDescriptor());
+        return wrapInTupleIfPig9(toSchema(field.gettStructDescriptor()));
       case TType.LIST:
-        fieldSchema = singleFieldToFieldSchema(fieldName, field.getListElemField());
-        break;
+        return wrapInTupleIfPig9(new Schema(singleFieldToFieldSchema(fieldName, field)));
       case TType.SET:
-        fieldSchema = singleFieldToFieldSchema(fieldName, field.getSetElemField());
-        break;
+        return wrapInTupleIfPig9(new Schema(singleFieldToFieldSchema(fieldName, field)));
       default:
-        fieldSchema = new FieldSchema(fieldName, null, getPigDataType(field));
-        if ( PigUtil.Pig9orNewer ) { // bag needs tuples (PIG 0.8 implicitly added this wrapper)
-          fieldSchema = new FieldSchema( "t", new Schema(fieldSchema),  DataType.TUPLE );
-        }
+        return wrapInTupleIfPig9(new Schema(new FieldSchema(fieldName, null, getPigDataType(field))));
     }
-
-    Schema schema = new Schema();
-    schema.add(fieldSchema);
-    return schema;
   }
 
   private static byte getPigDataType(Field field) {
@@ -425,7 +441,7 @@ public class ThriftToPig<M extends TBase<?, ?>> {
     if (args.length > 0) {
       Class<? extends TBase<?, ?>> tClass = ThriftUtils.getTypeRef(args[0]).getRawClass();
       System.out.println(args[0] + " : " + toSchema(tClass).toString());
-      System.out.println(toPigScript(tClass, LzoThriftB64LinePigLoader.class));
+      System.out.println(toPigScript(tClass, ThriftPigLoader.class));
     }
   }
 }
