@@ -14,6 +14,7 @@
 
   <property name="src.gen.java.dir" location="${build.dir}/gen-java"/>
   <property name="src.gen.piglet.dir" location="${build.dir}/gen-piglet"/>
+  <property name="src.gen.clojure.dir" location="${build.dir}/gen-clojure"/>
   <property name="classes.dir" location="${build.dir}/classes" />
 
   <path id="compile.classpath">
@@ -77,6 +78,19 @@
     </jar>
   </target>
 
+  <target name="generate-clojure" depends="jar">
+    <mkdir dir="${src.gen.clojure.dir}" />
+    <apply executable="protoc" failonerror="true" skipemptyfilesets="true" verbose="true">
+      <env key="PATH" path="${env.PATH}:." />
+      <env key="ELEPHANT_BIRD_VERSION" value="${version}"/>
+      <arg value="--proto_path=${src.proto.dir}" />
+      <!-- The following line will invoke protoc_gen_clojure, our protoc plugin -->
+      <arg value="--clojure_out=${src.gen.clojure.dir}" />
+      <fileset dir="${src.proto.dir}" includes="**/*.proto" />
+      <globmapper from="*.proto" to="*.clj" />
+    </apply>
+  </target>
+
   <target name="generate-piglet" depends="jar">
     <mkdir dir="${src.gen.piglet.dir}" />
     <apply executable="protoc" failonerror="true" skipemptyfilesets="true" verbose="true">
@@ -98,7 +112,7 @@
     </javadoc>
   </target>
 
-  <target name="package" depends="init, generate-piglet, javadoc"/>
+  <target name="package" depends="init, generate-clojure, generate-piglet, javadoc"/>
 
   <target name="clean" description="clean up">
     <delete dir="${build.dir}"/>
